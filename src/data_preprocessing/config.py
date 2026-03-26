@@ -8,4 +8,6 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Constants configuration
 COMPARE = True # Whether to compare the resulting meshes with the original smplx ones
-COMPARISON_FRAME = 40 # How often to compare the meshes (every N frames)
+COMPARE_FRAME = 40 # Frequency of frames to compare (if COMPARE is enabled)
+DISPLACEMENT_THRESHOLD = 0.02 # Displacement threshold for motion-diverse frame sampling (e.g., 0.02 means 2% of body height)
+TARGET_RATIO = 0.10 # Desired fraction of frames to keep for phenotype regression (e.g., 0.1 means keep 10% of frames)

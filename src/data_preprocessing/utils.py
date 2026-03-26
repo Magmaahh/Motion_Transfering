@@ -33,18 +33,20 @@ def show_mesh(verts, faces):
 # Compare two meshes visually
 def compare_meshes(verts1, verts2, faces1, faces2):
     scene = trimesh.Scene()
-    mesh_anny = trimesh.Trimesh(vertices=verts1, faces=faces1)
-    mesh_smplx = trimesh.Trimesh(vertices=verts2, faces=faces2)
+    mesh1 = trimesh.Trimesh(vertices=verts1, faces=faces1)
+    mesh1.visual.vertex_colors = [200, 50, 50, 255]  # red
+    mesh2 = trimesh.Trimesh(vertices=verts2, faces=faces2)
+    mesh2.visual.vertex_colors = [50, 50, 200, 255]  # blue
 
     # Compute shift based on bounding box size (so they don't overlap)
-    offset = mesh_anny.bounds[1][0] - mesh_anny.bounds[0][0]  # width in x
+    offset = mesh1.bounds[1][0] - mesh1.bounds[0][0]  # width in x
     shift = np.array([offset * 1.5, 0, 0])  # add some spacing
 
-    # Move SMPL-X mesh to the right
-    mesh_smplx.apply_translation(shift)
+    # Move second mesh to the right
+    mesh2.apply_translation(shift)
 
-    scene.add_geometry(mesh_anny, node_name='Anny Fit')
-    scene.add_geometry(mesh_smplx, node_name='SMPLX Original')
+    scene.add_geometry(mesh1)
+    scene.add_geometry(mesh2)
 
     scene.show()
 

@@ -44,20 +44,19 @@ def process_sequence(file_name):
     # Extract the smplx shape parameters (constant for the entire sequence)
     betas = torch.tensor(sample['betas'][:smplx_model.num_betas], dtype=torch.float32).unsqueeze(0).to(DEVICE)
     
-    frame_indices = [i for i in range(0, num_frames, max(1, num_frames // 3))] # every third frame
-
-    vertices_for_pheno = []
     full_vertices = []
+    vertices_for_pheno = []
 
     # Always include the T-pose frame for phenotype regression
-    vertices_for_pheno.append(smplx_model(betas=betas, return_verts=True).vertices[0].detach())
+    tpose_verts = smplx_model(betas=betas, return_verts=True).vertices[0].detach()
+    full_vertices.append(tpose_verts)
 
     # Iterate through each frame in the sequence to extract the corresponding vertices for phenotype regression and pose tracking
     for f in range(num_frames):
         root_orient = get_frame_tensor(sample, 'root_orient', f, DEVICE)
-        body_pose = get_frame_tensor(sample, 'pose_body', f, DEVICE)
-        transl = get_frame_tensor(sample, 'trans', f, DEVICE)
-        hand_pose = get_frame_tensor(sample, 'pose_hand', f, DEVICE)
+        body_pose = get_frame_tensor(sample, 'pose_body',   f, DEVICE)
+        transl = get_frame_tensor(sample, 'trans',       f, DEVICE)
+        hand_pose = get_frame_tensor(sample, 'pose_hand',   f, DEVICE)
 
         output = smplx_model(
             betas=betas,
@@ -70,11 +69,14 @@ def process_sequence(file_name):
             eye_pose=get_frame_tensor(sample, 'pose_eye', f, DEVICE),
             return_verts=True
         )
-        verts = output.vertices[0].detach()
-        full_vertices.append(verts)
 
-        if f in frame_indices:
-            vertices_for_pheno.append(verts)
+        full_vertices.append(output.vertices[0].detach())
+
+    # Select a subset of frames that are diverse in motion for phenotype regression (including the T-pose)
+    keep = sample_motion_diverse_frames(full_vertices, TARGET_RATIO, DISPLACEMENT_THRESHOLD)
+    vertices_for_pheno.append(tpose_verts) # always include T-pose
+    for idx in keep: # add the selected frames for phenotype regression
+        vertices_for_pheno.append(full_vertices[idx])
 
     # Stack into batch [B, V, 3] for regression
     vertices_for_pheno = torch.stack(vertices_for_pheno, dim=0).to(DEVICE)
@@ -124,12 +126,12 @@ def process_sequence(file_name):
             )
             fitted_verts = fitted_output['vertices'][0].detach().cpu().numpy()
 
-            print(f"\nComparing meshes at frame {f}... (ANNY in red, SMPL-X in blue)")
+            # Compare the meshes visually (first (SMPLX) in red, second (ANNY) in blue)
             compare_meshes(
-                full_vertices_np[f],
-                fitted_verts,
-                model.faces,
-                smplx_model.faces
+                full_vertices_np[f], # SMPL-X target vertices
+                fitted_verts, # ANNY fitted vertices
+                model.faces, # ANNY faces
+                smplx_model.faces # SMPL-X faces
             )
 
     # Save regressed ANNY parameters
