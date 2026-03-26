@@ -3,7 +3,7 @@ import anny
 import smplx
 import torch
 import numpy as np
-from anny import ParametersRegressor
+from parameters_regressor import ParametersRegressor
 
 from config import *
 from utils import *
@@ -13,7 +13,7 @@ from functions import *
 def process_sequence(file_name):
     """
     Processes an AMASS (SMPL-X) animation sequence and translates it into 
-    ANNY model parameters (pose and phenotypes).
+    ANNY model parameters (pose, local changes and phenotypes).
     """
     torch.set_default_dtype(torch.float32)
 
@@ -36,21 +36,20 @@ def process_sequence(file_name):
     ).to(DEVICE)
 
     # Initialize the target ANNY model (using the SMPL-X topology)
-    model = anny.create_fullbody_model(rig="default", topology="smplx").to(DEVICE).float()
+    model = anny.create_fullbody_model(rig="default", topology="smplx", local_changes=True).to(DEVICE).float()
     
     # Instantiate the regressor used to map SMPL-X vertices to ANNY parameters
-    regressor = ParametersRegressor(model=model)
+    regressor = ParametersRegressor(model=model, verbose=True)
 
     # Extract the smplx shape parameters (constant for the entire sequence)
     betas = torch.tensor(sample['betas'][:smplx_model.num_betas], dtype=torch.float32).unsqueeze(0).to(DEVICE)
     
-    frame_indices = [i for i in range(0, num_frames, max(1, num_frames // 3))] # every third frame
-
-    vertices_for_pheno = []
     full_vertices = []
+    vertices_for_pheno = []
 
     # Always include the T-pose frame for phenotype regression
-    vertices_for_pheno.append(smplx_model(betas=betas, return_verts=True).vertices[0].detach())
+    tpose_verts = smplx_model(betas=betas, return_verts=True).vertices[0].detach()
+    full_vertices.append(tpose_verts)
 
     # Iterate through each frame in the sequence to extract the corresponding vertices for phenotype regression and pose tracking
     for f in range(num_frames):
@@ -70,25 +69,31 @@ def process_sequence(file_name):
             eye_pose=get_frame_tensor(sample, 'pose_eye', f, DEVICE),
             return_verts=True
         )
-        verts = output.vertices[0].detach()
-        full_vertices.append(verts)
 
-        if f in frame_indices:
-            vertices_for_pheno.append(verts)
+        full_vertices.append(output.vertices[0].detach())
+
+    # Select a subset of frames that are diverse in motion for phenotype regression (including the T-pose)
+    keep = sample_motion_diverse_frames(full_vertices, TARGET_RATIO, DISPLACEMENT_THRESHOLD)
+    print(f"\nSelected frames for phenotype regression: {keep}")
+    vertices_for_pheno.append(tpose_verts) # always include T-pose
+    for idx in keep: # add the selected frames for phenotype regression
+        vertices_for_pheno.append(full_vertices[idx])
 
     # Stack into batch [B, V, 3] for regression
     vertices_for_pheno = torch.stack(vertices_for_pheno, dim=0).to(DEVICE)
 
     # Regress ANNY shape phenotypes (shared across all sampled frames)
-    _, phenotypes, _ = regressor(
+    _, phenotypes, local_changes, _ = regressor(
         vertices_target=vertices_for_pheno,
         optimize_phenotypes=True,
-        shared_phenotypes=True,
-        max_n_iters=30
+        shared_phenotypes=True
     )
 
     # Convert phenotypes to 1D for frame-wise pose tracking
     phenotypes = {k: v[:1].detach().clone() for k, v in phenotypes.items()}
+
+    # Convert local changes to 1D for frame-wise pose tracking (if they exist, otherwise set to None)
+    local_changes = {k: v[:1].detach().clone() for k, v in local_changes.items()} if local_changes is not None else None
 
     print("\nRegressed ANNY phenotypes:")
     for k, v in phenotypes.items():
@@ -102,9 +107,10 @@ def process_sequence(file_name):
     print("\nTracking pose across frames...")
     for f in range(num_frames):
         # Regress ANNY pose parameters to match the SMPL-X vertices
-        pose_params, _, _ = regressor(
+        pose_params, _, _, _ = regressor(
             vertices_target=full_vertices[f], # Use the current frame's vertices
-            initial_phenotype_kwargs=phenotypes, # Keep phenotypes frozen to the T-pose fit
+            initial_phenotype_kwargs=phenotypes, # Keep phenotypes frozen
+            initial_local_changes_kwargs=local_changes, # Keep local changes frozen
             initial_pose_parameters=prev_pose, # Warm-start with the previous frame's pose
             optimize_phenotypes=False
         )
@@ -120,16 +126,18 @@ def process_sequence(file_name):
             fitted_output = model(
                 pose_parameters=pose_params,
                 phenotype_kwargs=phenotypes,
+                local_changes_kwargs=local_changes,
                 pose_parameterization='root_relative_world'
             )
-            fitted_verts = fitted_output['vertices'][0].detach().cpu().numpy()
+            fitted_verts_np = fitted_output['vertices'][0].detach().cpu().numpy()
 
-            print(f"\nComparing meshes at frame {f}... (ANNY in red, SMPL-X in blue)")
+            # Compare the meshes visually (first (SMPLX) in red, second (ANNY) in blue)
+            print(f"\nComparing meshes at frame {f}... (SMPL-X in red, ANNY in blue)")
             compare_meshes(
-                full_vertices_np[f],
-                fitted_verts,
-                model.faces,
-                smplx_model.faces
+                full_vertices_np[f], # SMPL-X target vertices
+                fitted_verts_np, # ANNY fitted vertices
+                model.faces, # ANNY faces
+                smplx_model.faces # SMPL-X faces
             )
 
     # Save regressed ANNY parameters
@@ -143,14 +151,18 @@ def process_sequence(file_name):
         k: v.cpu().numpy()
         for k, v in phenotypes.items()
     }
+    local_changes_np = {
+        k: v.cpu().numpy()
+        for k, v in local_changes.items()
+    } if local_changes is not None else None
+
     np.savez(
         os.path.join(anim_output_path, f"{anim_name}_anny_params.npz"),
         poses=all_pose_params,
+        local_changes=local_changes_np,
         **phenotype_np
     )
     print(f"Parameters saved to: {anim_output_path}")
-
-    play_animation(full_vertices_np, smplx_model.faces)
 
 # Main execution loop
 if __name__ == "__main__":
