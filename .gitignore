@@ -1,2 +1,5 @@
 *.npz
 *.obj
+*.npy
+*.pkl
+*.pt

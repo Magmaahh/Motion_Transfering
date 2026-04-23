@@ -5,8 +5,6 @@ import torch
 import roma
 from typing import Dict, Any, Tuple, List, Optional
 
-import torch
-
 class ParametersRegressor:
     """
     Estimate Anny parameters fitting a target mesh.
@@ -537,73 +535,3 @@ class ParametersRegressor:
         pose_parameters = self.model.get_pose_parameterization(output, target_pose_parameterization=self.model.default_pose_parameterization)
             
         return pose_parameters, phenotype_kwargs, local_changes_kwargs, v_hat
-    
-    @torch.no_grad()
-    def fit_with_age_anchor_search(
-        self,
-        vertices_target: torch.Tensor,
-        age_anchors: List[float] = [0.0, 0.33, 0.67, 1.0],
-        initial_phenotype_kwargs: Optional[Dict[str, Any]] = None,
-        optimize_phenotypes: bool = True,
-        excluded_phenotypes: Optional[List[str]] = None,
-        initial_pose_parameters: torch.Tensor = None,
-        max_n_iters: int = None,
-        max_delta: int = 0.2,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
-        """
-        Batch-mode age anchor search: selects best age per sample, then optimizes other phenotypes.
-
-        Returns:
-            - pose_parameters
-            - phenotype_kwargs
-            - v_hat
-        """
-        B = vertices_target.shape[0]
-        initial_phenotype_kwargs = initial_phenotype_kwargs or {}
-
-        device = vertices_target.device
-        best_ages = torch.zeros(B, device=device)
-        best_heights = torch.zeros(B, device=device)
-        best_errors = torch.full((B,), float('inf'), device=device)
-
-        macros = {
-                k: (torch.full((B,), float(v), device=device) if not isinstance(v, torch.Tensor) else v.to(device))
-                for k, v in initial_phenotype_kwargs.items()
-            }
-        for anchor in age_anchors:
-            macros['age'] = torch.full((B,), anchor, device=device)
-
-            excluded_phenotypes = ['age']
-            # excluded_phenotypes = []
-            pose_parameters, _macros, v_hat = self.__call__(
-                vertices_target,
-                initial_phenotype_kwargs=macros,
-                optimize_phenotypes=True,
-                excluded_phenotypes=excluded_phenotypes,
-                initial_pose_parameters=initial_pose_parameters,
-                max_n_iters=max_n_iters,
-                max_delta=max_delta,
-            )
-            pve = 1000. * torch.norm(v_hat - vertices_target, dim=-1).mean(dim=-1)  # [B]
-
-            update_mask = pve < best_errors
-            best_errors[update_mask] = pve[update_mask]
-            best_ages[update_mask] = anchor
-            best_heights[update_mask] = _macros['height'][update_mask]
-
-            if self.verbose:
-                print(f"Age {anchor:.2f} → mean PVE: {pve.mean().item():.2f} mm")
-
-        # Prepare final macro kwargs with selected age per sample
-        macros['age'] = best_ages
-        macros['height'] = best_heights
-
-        pose_parameters, phenotype_kwargs, v_hat = self.__call__(
-            vertices_target,
-            initial_phenotype_kwargs=macros,
-            optimize_phenotypes=True,
-            excluded_phenotypes=[],
-            max_delta=0.1,
-        )
-
-        return pose_parameters, phenotype_kwargs, v_hat

@@ -1,8 +1,11 @@
 import anny
 import smplx
-from parameters_regressor import ParametersRegressor
+from jsonargparse import CLI
 
+from parameters_regressor import ParametersRegressor
 from utils import *
+from config import *
+from interactive_viewer import interactive_compare_meshes
 
 # Samples a subset of frames from the full sequence based on motion diversity (displacement threshold)
 def sample_motion_diverse_frames(full_vertices, target_ratio=0.10, threshold_factor=0.02):
@@ -34,11 +37,11 @@ def sample_motion_diverse_frames(full_vertices, target_ratio=0.10, threshold_fac
             last_selected = full_vertices[i]
 
             # Stop when reaching the target ratio of selected frames
-            if len(selected) >= 10: # int(T * target_ratio) if enough memory available
+            if len(selected) >= 10: # int(T * target_ratio)
                 break
     
     # If not enough frames were selected, fallback to uniform sampling
-    if len(selected) < 10: # int(T * target_ratio) if enough memory available
+    if len(selected) < 10: # int(T * target_ratio)
         selected = list(range(0, T, max(1, T // int(T * target_ratio))))
 
     return selected
@@ -146,18 +149,27 @@ def process_sequence(sequence):
     # Fit ANNY pose parameters frame-by-frame while keeping phenotypes frozen
     prev_pose = None
     all_pose_params = []
+    all_pve = []
+    
+    results = {
+        "mean_pve": 0,
+        "max_pve": 0
+    }
 
     # Iterate through every frame in the sequence
     print("\nTracking pose across frames...")
     for f in range(num_frames):
         # Regress ANNY pose parameters to match the SMPL-X vertices
-        pose_params, _, _, _ = regressor(
+        pose_params, _, _, v_hat = regressor(
             vertices_target=full_vertices[f], # Use the current frame's vertices
             initial_phenotype_kwargs=phenotypes, # Keep phenotypes frozen
             initial_local_changes_kwargs=local_changes, # Keep local changes frozen
             initial_pose_parameters=prev_pose, # Warm-start with the previous frame's pose
             optimize_phenotypes=False
         )
+
+        pve = 1000. * torch.norm(v_hat - full_vertices[f], dim=-1).mean()
+        all_pve.append(pve)
 
         # Store the current pose to be used in the next frame
         prev_pose = pose_params.detach().float()
@@ -167,22 +179,21 @@ def process_sequence(sequence):
 
         # Visually compare the SMPL-X target vs ANNY prediction (every COMPARISON_FRAME frame, if COMPARE is enabled)
         if COMPARE and f % COMPARE_FRAME == 0:
-            fitted_output = model(
-                pose_parameters=pose_params,
-                phenotype_kwargs=phenotypes,
-                local_changes_kwargs=local_changes,
-                pose_parameterization='root_relative_world'
-            )
-            fitted_verts_np = fitted_output['vertices'][0].detach().cpu().numpy()
-
-            # Compare the meshes visually (first (SMPL-X) in red, second (ANNY) in blue)
+            # Compare the meshes visually
             print(f"\nComparing meshes at frame {f}... (SMPL-X in red, ANNY in blue)")
-            compare_meshes(
-                full_vertices_np[f], # SMPL-X target vertices
-                fitted_verts_np, # ANNY fitted vertices
-                model.faces, # ANNY faces
-                smplx_model.faces # SMPL-X faces
-            )
+            compare_parameters = {"phenotypes": phenotypes, "local_changes": local_changes, "pose_params": pose_params}
+            
+            CLI(interactive_compare_meshes(
+                model_type="anny", 
+                mesh_data={"verts": v_hat.cpu().numpy(), "faces": smplx_model.faces}, 
+                parameters=compare_parameters, 
+                reference_model_type="smplx", 
+                reference_mesh_data={"verts": full_vertices_np[f], "faces": smplx_model.faces}
+            ))
+        
+    parameters = {"phenotypes": phenotypes, "local_changes": local_changes, "pose_params": all_pose_params}
 
-    return {"phenotypes": phenotypes, "local_changes": local_changes, "pose_params": all_pose_params}
-    
+    results["mean_pve"] = torch.tensor(all_pve).mean().item()
+    results["max_pve"] = torch.tensor(all_pve).max().item()
+
+    return parameters, results
